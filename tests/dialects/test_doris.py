@@ -12,6 +12,20 @@ class TestDoris(Validator):
                 "oracle": "SELECT CAST('2020-02-02 00:00:00' AS DATE)",
             },
         )
+        self.validate_all(
+            "SELECT MAX_BY(a, b), MIN_BY(c, d)",
+            read={"clickhouse": "SELECT argMax(a, b), argMin(c, d)"},
+        )
+        self.validate_all(
+            "SELECT ARRAY_SUM(x -> x * x, ARRAY(2, 3))",
+            read={
+                "clickhouse": "SELECT arraySum(x -> x*x, [2, 3])",
+            },
+            write={
+                "clickhouse": "SELECT arraySum(x -> x * x, [2, 3])",
+                "doris": "SELECT ARRAY_SUM(x -> x * x, ARRAY(2, 3))",
+            },
+        )
 
     def test_identity(self):
         self.validate_identity("COALECSE(a, b, c, d)")

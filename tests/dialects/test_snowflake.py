@@ -10,6 +10,9 @@ class TestSnowflake(Validator):
     dialect = "snowflake"
 
     def test_snowflake(self):
+        self.validate_identity(
+            "INSERT OVERWRITE TABLE t SELECT 1", "INSERT OVERWRITE INTO t SELECT 1"
+        )
         self.validate_identity("SELECT rename, replace")
         expr = parse_one("SELECT APPROX_TOP_K(C4, 3, 5) FROM t")
         expr.selects[0].assert_is(exp.AggFunc)
@@ -36,6 +39,8 @@ WHERE
   )""",
         )
 
+        self.validate_identity("RM @parquet_stage")
+        self.validate_identity("REMOVE @parquet_stage")
         self.validate_identity("SELECT TIMESTAMP_FROM_PARTS(d, t)")
         self.validate_identity("SELECT GET_PATH(v, 'attr[0].name') FROM vartab")
         self.validate_identity("SELECT TO_ARRAY(CAST(x AS ARRAY))")
@@ -574,6 +579,14 @@ WHERE
             },
         )
         self.validate_all(
+            "SELECT TO_TIMESTAMP(16599817290000, 4)",
+            write={
+                "bigquery": "SELECT TIMESTAMP_SECONDS(CAST(16599817290000 / POW(10, 4) AS INT64))",
+                "snowflake": "SELECT TO_TIMESTAMP(16599817290000, 4)",
+                "spark": "SELECT TIMESTAMP_SECONDS(16599817290000 / POW(10, 4))",
+            },
+        )
+        self.validate_all(
             "SELECT TO_TIMESTAMP('1659981729')",
             write={
                 "snowflake": "SELECT TO_TIMESTAMP('1659981729')",
@@ -583,11 +596,11 @@ WHERE
         self.validate_all(
             "SELECT TO_TIMESTAMP(1659981729000000000, 9)",
             write={
-                "bigquery": "SELECT TIMESTAMP_MICROS(CAST(1659981729000000000 / 1000 AS INT64))",
-                "duckdb": "SELECT TO_TIMESTAMP(1659981729000000000 / 1000000000)",
-                "presto": "SELECT FROM_UNIXTIME(CAST(1659981729000000000 AS DOUBLE) / 1000000000)",
+                "bigquery": "SELECT TIMESTAMP_SECONDS(CAST(1659981729000000000 / POW(10, 9) AS INT64))",
+                "duckdb": "SELECT TO_TIMESTAMP(1659981729000000000 / POW(10, 9))",
+                "presto": "SELECT FROM_UNIXTIME(CAST(1659981729000000000 AS DOUBLE) / POW(10, 9))",
                 "snowflake": "SELECT TO_TIMESTAMP(1659981729000000000, 9)",
-                "spark": "SELECT TIMESTAMP_SECONDS(1659981729000000000 / 1000000000)",
+                "spark": "SELECT TIMESTAMP_SECONDS(1659981729000000000 / POW(10, 9))",
             },
         )
         self.validate_all(

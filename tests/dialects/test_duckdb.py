@@ -7,9 +7,22 @@ class TestDuckDB(Validator):
     dialect = "duckdb"
 
     def test_duckdb(self):
+        struct_pack = parse_one('STRUCT_PACK("a b" := 1)', read="duckdb")
+        self.assertIsInstance(struct_pack.expressions[0].this, exp.Identifier)
+        self.assertEqual(struct_pack.sql(dialect="duckdb"), "{'a b': 1}")
+
+        self.validate_all(
+            "SELECT SUM(X) OVER (ORDER BY x)",
+            write={
+                "bigquery": "SELECT SUM(X) OVER (ORDER BY x NULLS LAST)",
+                "duckdb": "SELECT SUM(X) OVER (ORDER BY x)",
+                "mysql": "SELECT SUM(X) OVER (ORDER BY CASE WHEN x IS NULL THEN 1 ELSE 0 END, x)",
+            },
+        )
         self.validate_all(
             "SELECT SUM(X) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)",
             write={
+                "bigquery": "SELECT SUM(X) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)",
                 "duckdb": "SELECT SUM(X) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)",
                 "mysql": "SELECT SUM(X) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)",
             },
@@ -419,7 +432,7 @@ class TestDuckDB(Validator):
             },
         )
         self.validate_all(
-            "IF(y <> 0, x / y, NULL)",
+            "IF((y) <> 0, (x) / (y), NULL)",
             read={
                 "bigquery": "SAFE_DIVIDE(x, y)",
             },
@@ -659,7 +672,7 @@ class TestDuckDB(Validator):
             write={
                 "bigquery": "TIMESTAMP_MILLIS(x)",
                 "duckdb": "EPOCH_MS(x)",
-                "presto": "FROM_UNIXTIME(CAST(x AS DOUBLE) / 1000)",
+                "presto": "FROM_UNIXTIME(CAST(x AS DOUBLE) / POW(10, 3))",
                 "spark": "TIMESTAMP_MILLIS(x)",
             },
         )

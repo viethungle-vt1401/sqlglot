@@ -533,7 +533,7 @@ def no_recursive_cte_sql(self: Generator, expression: exp.With) -> str:
 def no_safe_divide_sql(self: Generator, expression: exp.SafeDivide) -> str:
     n = self.sql(expression, "this")
     d = self.sql(expression, "expression")
-    return f"IF({d} <> 0, {n} / {d}, NULL)"
+    return f"IF(({d}) <> 0, ({n}) / ({d}), NULL)"
 
 
 def no_tablesample_sql(self: Generator, expression: exp.TableSample) -> str:
@@ -903,11 +903,6 @@ def bool_xor_sql(self: Generator, expression: exp.Xor) -> str:
     a = self.sql(expression.left)
     b = self.sql(expression.right)
     return f"({a} AND (NOT {b})) OR ((NOT {a}) AND {b})"
-
-
-# Used to generate JSON_OBJECT with a comma in BigQuery and MySQL instead of colon
-def json_keyvalue_comma_sql(self: Generator, expression: exp.JSONKeyValue) -> str:
-    return f"{self.sql(expression, 'this')}, {self.sql(expression, 'expression')}"
 
 
 def is_parse_json(expression: exp.Expression) -> bool:

@@ -1102,7 +1102,7 @@ class Clone(Expression):
 
 
 class Describe(Expression):
-    arg_types = {"this": True, "kind": False, "expressions": False}
+    arg_types = {"this": True, "extended": False, "kind": False, "expressions": False}
 
 
 class Kill(Expression):
@@ -1967,7 +1967,12 @@ class Offset(Expression):
 
 
 class Order(Expression):
-    arg_types = {"this": False, "expressions": True, "interpolate": False}
+    arg_types = {
+        "this": False,
+        "expressions": True,
+        "interpolate": False,
+        "siblings": False,
+    }
 
 
 # https://clickhouse.com/docs/en/sql-reference/statements/select/order-by#order-by-expr-with-fill-modifier
@@ -2712,6 +2717,14 @@ class Unnest(UDTF):
         "alias": False,
         "offset": False,
     }
+
+    @property
+    def selects(self) -> t.List[Expression]:
+        columns = super().selects
+        offset = self.args.get("offset")
+        if offset:
+            columns = columns + [to_identifier("offset") if offset is True else offset]
+        return columns
 
 
 class Update(Expression):
@@ -3626,6 +3639,7 @@ class DataType(Expression):
         BOOLEAN = auto()
         CHAR = auto()
         DATE = auto()
+        DATE32 = auto()
         DATEMULTIRANGE = auto()
         DATERANGE = auto()
         DATETIME = auto()
@@ -3653,6 +3667,8 @@ class DataType(Expression):
         INTERVAL = auto()
         IPADDRESS = auto()
         IPPREFIX = auto()
+        IPV4 = auto()
+        IPV6 = auto()
         JSON = auto()
         JSONB = auto()
         LONGBLOB = auto()
@@ -3751,6 +3767,7 @@ class DataType(Expression):
         Type.TIMESTAMP_MS,
         Type.TIMESTAMP_NS,
         Type.DATE,
+        Type.DATE32,
         Type.DATETIME,
         Type.DATETIME64,
     }
@@ -4430,7 +4447,7 @@ class ArraySort(Func):
 
 
 class ArraySum(Func):
-    pass
+    arg_types = {"this": True, "expression": False}
 
 
 class ArrayUnionAgg(AggFunc):
@@ -4827,6 +4844,16 @@ class JSONObject(Func):
     }
 
 
+class JSONObjectAgg(AggFunc):
+    arg_types = {
+        "expressions": False,
+        "null_handling": False,
+        "unique_keys": False,
+        "return_type": False,
+        "encoding": False,
+    }
+
+
 # https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/JSON_ARRAY.html
 class JSONArray(Func):
     arg_types = {
@@ -5108,7 +5135,7 @@ class RegexpReplace(Func):
     arg_types = {
         "this": True,
         "expression": True,
-        "replacement": True,
+        "replacement": False,
         "position": False,
         "occurrence": False,
         "parameters": False,
@@ -5338,10 +5365,16 @@ class UnixToStr(Func):
 class UnixToTime(Func):
     arg_types = {"this": True, "scale": False, "zone": False, "hours": False, "minutes": False}
 
-    SECONDS = Literal.string("seconds")
-    MILLIS = Literal.string("millis")
-    MICROS = Literal.string("micros")
-    NANOS = Literal.string("nanos")
+    SECONDS = Literal.number(0)
+    DECIS = Literal.number(1)
+    CENTIS = Literal.number(2)
+    MILLIS = Literal.number(3)
+    DECIMILLIS = Literal.number(4)
+    CENTIMILLIS = Literal.number(5)
+    MICROS = Literal.number(6)
+    DECIMICROS = Literal.number(7)
+    CENTIMICROS = Literal.number(8)
+    NANOS = Literal.number(9)
 
 
 class UnixToTimeStr(Func):
@@ -5944,7 +5977,7 @@ def delete(
 def insert(
     expression: ExpOrStr,
     into: ExpOrStr,
-    columns: t.Optional[t.Sequence[ExpOrStr]] = None,
+    columns: t.Optional[t.Sequence[str | Identifier]] = None,
     overwrite: t.Optional[bool] = None,
     returning: t.Optional[ExpOrStr] = None,
     dialect: DialectType = None,
@@ -5975,15 +6008,7 @@ def insert(
     this: Table | Schema = maybe_parse(into, into=Table, dialect=dialect, copy=copy, **opts)
 
     if columns:
-        this = _apply_list_builder(
-            *columns,
-            instance=Schema(this=this),
-            arg="expressions",
-            into=Identifier,
-            copy=False,
-            dialect=dialect,
-            **opts,
-        )
+        this = Schema(this=this, expressions=[to_identifier(c, copy=copy) for c in columns])
 
     insert = Insert(this=this, expression=expr, overwrite=overwrite)
 

@@ -17,7 +17,6 @@ from sqlglot.dialects.dialect import (
     encode_decode_sql,
     format_time_lambda,
     inline_array_sql,
-    json_keyvalue_comma_sql,
     no_comment_column_constraint_sql,
     no_properties_sql,
     no_safe_divide_sql,
@@ -142,11 +141,8 @@ def _unix_to_time_sql(self: DuckDB.Generator, expression: exp.UnixToTime) -> str
         return f"EPOCH_MS({timestamp})"
     if scale == exp.UnixToTime.MICROS:
         return f"MAKE_TIMESTAMP({timestamp})"
-    if scale == exp.UnixToTime.NANOS:
-        return f"TO_TIMESTAMP({timestamp} / 1000000000)"
 
-    self.unsupported(f"Unsupported scale for timestamp: {scale}.")
-    return ""
+    return f"TO_TIMESTAMP({timestamp} / POW(10, {scale}))"
 
 
 def _rename_unless_within_group(
@@ -157,6 +153,13 @@ def _rename_unless_within_group(
         if isinstance(expression.find_ancestor(exp.Select, exp.WithinGroup), exp.WithinGroup)
         else self.func(b, *flatten(expression.args.values()))
     )
+
+
+def _parse_struct_pack(args: t.List) -> exp.Struct:
+    args_with_columns_as_identifiers = [
+        exp.PropertyEQ(this=arg.this.this, expression=arg.expression) for arg in args
+    ]
+    return exp.Struct.from_arg_list(args_with_columns_as_identifiers)
 
 
 class DuckDB(Dialect):
@@ -252,7 +255,7 @@ class DuckDB(Dialect):
             "STRING_SPLIT_REGEX": exp.RegexpSplit.from_arg_list,
             "STRING_TO_ARRAY": exp.Split.from_arg_list,
             "STRPTIME": format_time_lambda(exp.StrToTime, "duckdb"),
-            "STRUCT_PACK": exp.Struct.from_arg_list,
+            "STRUCT_PACK": _parse_struct_pack,
             "STR_SPLIT": exp.Split.from_arg_list,
             "STR_SPLIT_REGEX": exp.RegexpSplit.from_arg_list,
             "TO_TIMESTAMP": exp.UnixToTime.from_arg_list,
@@ -293,7 +296,7 @@ class DuckDB(Dialect):
 
             return this
 
-        def _parse_struct_types(self) -> t.Optional[exp.Expression]:
+        def _parse_struct_types(self, type_required: bool = False) -> t.Optional[exp.Expression]:
             return self._parse_field_def()
 
         def _pivot_column_names(self, aggregations: t.List[exp.Expression]) -> t.List[str]:
@@ -313,6 +316,7 @@ class DuckDB(Dialect):
         TABLESAMPLE_KEYWORDS = "USING SAMPLE"
         TABLESAMPLE_SEED_KEYWORD = "REPEATABLE"
         LAST_DAY_SUPPORTS_DATE_PART = False
+        JSON_KEY_VALUE_PAIR_SEP = ","
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
@@ -355,7 +359,6 @@ class DuckDB(Dialect):
             exp.JSONExtract: arrow_json_extract_sql,
             exp.JSONExtractScalar: arrow_json_extract_scalar_sql,
             exp.JSONFormat: _json_format_sql,
-            exp.JSONKeyValue: json_keyvalue_comma_sql,
             exp.LogicalOr: rename_func("BOOL_OR"),
             exp.LogicalAnd: rename_func("BOOL_AND"),
             exp.MonthsBetween: lambda self, e: self.func(

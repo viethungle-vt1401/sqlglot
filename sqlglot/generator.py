@@ -112,7 +112,8 @@ class Generator:
     }
 
     # Whether or not null ordering is supported in order by
-    NULL_ORDERING_SUPPORTED = True
+    # True: Full Support, None: No support, False: No support in window specifications
+    NULL_ORDERING_SUPPORTED: t.Optional[bool] = True
 
     # Whether or not locking reads (i.e. SELECT ... FOR UPDATE/SHARE) are supported
     LOCKING_READS_SUPPORTED = False
@@ -250,6 +251,18 @@ class Generator:
 
     # Whether or not UNPIVOT aliases are Identifiers (False means they're Literals)
     UNPIVOT_ALIASES_ARE_IDENTIFIERS = True
+
+    # What delimiter to use for separating JSON key/value pairs
+    JSON_KEY_VALUE_PAIR_SEP = ":"
+
+    # INSERT OVERWRITE TABLE x override
+    INSERT_OVERWRITE = " OVERWRITE TABLE"
+
+    # Whether or not the SELECT .. INTO syntax is used instead of CTAS
+    SUPPORTS_SELECT_INTO = False
+
+    # Whether or not UNLOGGED tables can be created
+    SUPPORTS_UNLOGGED_TABLES = False
 
     TYPE_MAPPING = {
         exp.DataType.Type.NCHAR: "CHAR",
@@ -887,7 +900,12 @@ class Generator:
         return f"{shallow}{keyword} {this}"
 
     def describe_sql(self, expression: exp.Describe) -> str:
-        return f"DESCRIBE {self.sql(expression, 'this')}"
+        extended = " EXTENDED" if expression.args.get("extended") else ""
+        return f"DESCRIBE{extended} {self.sql(expression, 'this')}"
+
+    def heredoc_sql(self, expression: exp.Heredoc) -> str:
+        tag = self.sql(expression, "tag")
+        return f"${tag}${self.sql(expression, 'this')}${tag}$"
 
     def heredoc_sql(self, expression: exp.Heredoc) -> str:
         tag = self.sql(expression, "tag")
@@ -1345,7 +1363,7 @@ class Generator:
         if isinstance(expression.this, exp.Directory):
             this = " OVERWRITE" if overwrite else " INTO"
         else:
-            this = " OVERWRITE TABLE" if overwrite else " INTO"
+            this = self.INSERT_OVERWRITE if overwrite else " INTO"
 
         alternative = expression.args.get("alternative")
         alternative = f" OR {alternative}" if alternative else ""
@@ -1848,7 +1866,8 @@ class Generator:
     def order_sql(self, expression: exp.Order, flat: bool = False) -> str:
         this = self.sql(expression, "this")
         this = f"{this} " if this else this
-        order = self.op_expressions(f"{this}ORDER BY", expression, flat=this or flat)  # type: ignore
+        siblings = "SIBLINGS " if expression.args.get("siblings") else ""
+        order = self.op_expressions(f"{this}ORDER {siblings}BY", expression, flat=this or flat)  # type: ignore
         interpolated_values = [
             f"{self.sql(named_expression, 'alias')} AS {self.sql(named_expression, 'this')}"
             for named_expression in expression.args.get("interpolate") or []
@@ -1904,18 +1923,20 @@ class Generator:
         # If the NULLS FIRST/LAST clause is unsupported, we add another sort key to simulate it
         if nulls_sort_change and not self.NULL_ORDERING_SUPPORTED:
             window = expression.find_ancestor(exp.Window, exp.Select)
-            if expression.this.is_int:
-                self.unsupported(
-                    f"'{nulls_sort_change.strip()}' translation not supported with positional ordering"
-                )
-            elif isinstance(window, exp.Window) and window.args.get("spec"):
+            if isinstance(window, exp.Window) and window.args.get("spec"):
                 self.unsupported(
                     f"'{nulls_sort_change.strip()}' translation not supported in window functions"
                 )
-            else:
-                null_sort_order = " DESC" if nulls_sort_change == " NULLS FIRST" else ""
-                this = f"CASE WHEN {this} IS NULL THEN 1 ELSE 0 END{null_sort_order}, {this}"
-            nulls_sort_change = ""
+                nulls_sort_change = ""
+            elif self.NULL_ORDERING_SUPPORTED is None:
+                if expression.this.is_int:
+                    self.unsupported(
+                        f"'{nulls_sort_change.strip()}' translation not supported with positional ordering"
+                    )
+                else:
+                    null_sort_order = " DESC" if nulls_sort_change == " NULLS FIRST" else ""
+                    this = f"CASE WHEN {this} IS NULL THEN 1 ELSE 0 END{null_sort_order}, {this}"
+                nulls_sort_change = ""
 
         with_fill = self.sql(expression, "with_fill")
         with_fill = f" {with_fill}" if with_fill else ""
@@ -2014,6 +2035,10 @@ class Generator:
         return [locks, self.sql(expression, "sample")]
 
     def select_sql(self, expression: exp.Select) -> str:
+        into = expression.args.get("into")
+        if not self.SUPPORTS_SELECT_INTO and into:
+            into.pop()
+
         hint = self.sql(expression, "hint")
         distinct = self.sql(expression, "distinct")
         distinct = f" {distinct}" if distinct else ""
@@ -2058,7 +2083,19 @@ class Generator:
             self.sql(expression, "into", comment=False),
             self.sql(expression, "from", comment=False),
         )
-        return self.prepend_ctes(expression, sql)
+
+        sql = self.prepend_ctes(expression, sql)
+
+        if not self.SUPPORTS_SELECT_INTO and into:
+            if into.args.get("temporary"):
+                table_kind = " TEMPORARY"
+            elif self.SUPPORTS_UNLOGGED_TABLES and into.args.get("unlogged"):
+                table_kind = " UNLOGGED"
+            else:
+                table_kind = ""
+            sql = f"CREATE{table_kind} TABLE {self.sql(into.this)} AS {sql}"
+
+        return sql
 
     def schema_sql(self, expression: exp.Schema) -> str:
         this = self.sql(expression, "this")
@@ -2319,28 +2356,34 @@ class Generator:
         return f"{self.func('MATCH', *expression.expressions)} AGAINST({self.sql(expression, 'this')}{modifier})"
 
     def jsonkeyvalue_sql(self, expression: exp.JSONKeyValue) -> str:
-        return f"{self.sql(expression, 'this')}: {self.sql(expression, 'expression')}"
+        return f"{self.sql(expression, 'this')}{self.JSON_KEY_VALUE_PAIR_SEP} {self.sql(expression, 'expression')}"
 
     def formatjson_sql(self, expression: exp.FormatJson) -> str:
         return f"{self.sql(expression, 'this')} FORMAT JSON"
 
-    def jsonobject_sql(self, expression: exp.JSONObject) -> str:
+    def jsonobject_sql(self, expression: exp.JSONObject | exp.JSONObjectAgg) -> str:
         null_handling = expression.args.get("null_handling")
         null_handling = f" {null_handling}" if null_handling else ""
+
         unique_keys = expression.args.get("unique_keys")
         if unique_keys is not None:
             unique_keys = f" {'WITH' if unique_keys else 'WITHOUT'} UNIQUE KEYS"
         else:
             unique_keys = ""
+
         return_type = self.sql(expression, "return_type")
         return_type = f" RETURNING {return_type}" if return_type else ""
         encoding = self.sql(expression, "encoding")
         encoding = f" ENCODING {encoding}" if encoding else ""
+
         return self.func(
-            "JSON_OBJECT",
+            "JSON_OBJECT" if isinstance(expression, exp.JSONObject) else "JSON_OBJECTAGG",
             *expression.expressions,
             suffix=f"{null_handling}{unique_keys}{return_type}{encoding})",
         )
+
+    def jsonobjectagg_sql(self, expression: exp.JSONObjectAgg) -> str:
+        return self.jsonobject_sql(expression)
 
     def jsonarray_sql(self, expression: exp.JSONArray) -> str:
         null_handling = expression.args.get("null_handling")

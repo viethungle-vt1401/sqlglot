@@ -63,6 +63,7 @@ class ClickHouse(Dialect):
         KEYWORDS = {
             **tokens.Tokenizer.KEYWORDS,
             "ATTACH": TokenType.COMMAND,
+            "DATE32": TokenType.DATE32,
             "DATETIME64": TokenType.DATETIME64,
             "DICTIONARY": TokenType.DICTIONARY,
             "ENUM": TokenType.ENUM,
@@ -85,6 +86,8 @@ class ClickHouse(Dialect):
             "UINT32": TokenType.UINT,
             "UINT64": TokenType.UBIGINT,
             "UINT8": TokenType.UTINYINT,
+            "IPV4": TokenType.IPV4,
+            "IPV6": TokenType.IPV6,
         }
 
         SINGLE_TOKENS = {
@@ -101,6 +104,7 @@ class ClickHouse(Dialect):
         FUNCTIONS = {
             **parser.Parser.FUNCTIONS,
             "ANY": exp.AnyValue.from_arg_list,
+            "ARRAYSUM": exp.ArraySum.from_arg_list,
             "COUNTIF": _parse_count_if,
             "DATE_ADD": lambda args: exp.DateAdd(
                 this=seq_get(args, 2), expression=seq_get(args, 1), unit=seq_get(args, 0)
@@ -517,6 +521,7 @@ class ClickHouse(Dialect):
             **STRING_TYPE_MAPPING,
             exp.DataType.Type.ARRAY: "Array",
             exp.DataType.Type.BIGINT: "Int64",
+            exp.DataType.Type.DATE32: "Date32",
             exp.DataType.Type.DATETIME64: "DateTime64",
             exp.DataType.Type.DOUBLE: "Float64",
             exp.DataType.Type.ENUM: "Enum",
@@ -541,13 +546,15 @@ class ClickHouse(Dialect):
             exp.DataType.Type.UINT256: "UInt256",
             exp.DataType.Type.USMALLINT: "UInt16",
             exp.DataType.Type.UTINYINT: "UInt8",
+            exp.DataType.Type.IPV4: "IPv4",
+            exp.DataType.Type.IPV6: "IPv6",
         }
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
-            exp.Select: transforms.preprocess([transforms.eliminate_qualify]),
             exp.AnyValue: rename_func("any"),
             exp.ApproxDistinct: rename_func("uniq"),
+            exp.ArraySum: rename_func("arraySum"),
             exp.ArgMax: arg_max_or_min_no_count("argMax"),
             exp.ArgMin: arg_max_or_min_no_count("argMin"),
             exp.Array: inline_array_sql,
@@ -566,6 +573,7 @@ class ClickHouse(Dialect):
             exp.Quantile: _quantile_sql,
             exp.RegexpLike: lambda self, e: f"match({self.format_args(e.this, e.expression)})",
             exp.Rand: rename_func("randCanonical"),
+            exp.Select: transforms.preprocess([transforms.eliminate_qualify]),
             exp.StartsWith: rename_func("startsWith"),
             exp.StrPosition: lambda self, e: f"position({self.format_args(e.this, e.args.get('substr'), e.args.get('position'))})",
             exp.VarMap: lambda self, e: _lower_func(var_map_sql(self, e)),

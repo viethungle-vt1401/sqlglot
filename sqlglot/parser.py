@@ -12,6 +12,8 @@ from sqlglot.tokens import Token, Tokenizer, TokenType
 from sqlglot.trie import TrieResult, in_trie, new_trie
 
 if t.TYPE_CHECKING:
+    from typing_extensions import Literal
+
     from sqlglot._typing import E
     from sqlglot.dialects.dialect import Dialect, DialectType
 
@@ -193,6 +195,7 @@ class Parser(metaclass=_Parser):
         TokenType.DATETIME,
         TokenType.DATETIME64,
         TokenType.DATE,
+        TokenType.DATE32,
         TokenType.INT4RANGE,
         TokenType.INT4MULTIRANGE,
         TokenType.INT8RANGE,
@@ -232,6 +235,8 @@ class Parser(metaclass=_Parser):
         TokenType.INET,
         TokenType.IPADDRESS,
         TokenType.IPPREFIX,
+        TokenType.IPV4,
+        TokenType.IPV6,
         TokenType.UNKNOWN,
         TokenType.NULL,
         *ENUM_TYPE_TOKENS,
@@ -845,6 +850,7 @@ class Parser(metaclass=_Parser):
         "DECODE": lambda self: self._parse_decode(),
         "EXTRACT": lambda self: self._parse_extract(),
         "JSON_OBJECT": lambda self: self._parse_json_object(),
+        "JSON_OBJECTAGG": lambda self: self._parse_json_object(agg=True),
         "JSON_TABLE": lambda self: self._parse_json_table(),
         "MATCH": lambda self: self._parse_match_against(),
         "OPENJSON": lambda self: self._parse_open_json(),
@@ -928,6 +934,8 @@ class Parser(metaclass=_Parser):
     WINDOW_ALIAS_TOKENS = ID_VAR_TOKENS - {TokenType.ROWS}
     WINDOW_BEFORE_PAREN_TOKENS = {TokenType.OVER}
     WINDOW_SIDES = {"FOLLOWING", "PRECEDING"}
+
+    JSON_KEY_VALUE_SEPARATOR_TOKENS = {TokenType.COLON, TokenType.COMMA, TokenType.IS}
 
     FETCH_TOKENS = ID_VAR_TOKENS - {TokenType.ROW, TokenType.ROWS, TokenType.PERCENT}
 
@@ -1947,10 +1955,13 @@ class Parser(metaclass=_Parser):
 
     def _parse_describe(self) -> exp.Describe:
         kind = self._match_set(self.CREATABLES) and self._prev.text
+        extended = self._match_text_seq("EXTENDED")
         this = self._parse_table(schema=True)
         properties = self._parse_properties()
         expressions = properties.expressions if properties else None
-        return self.expression(exp.Describe, this=this, kind=kind, expressions=expressions)
+        return self.expression(
+            exp.Describe, this=this, extended=extended, kind=kind, expressions=expressions
+        )
 
     def _parse_insert(self) -> exp.Insert:
         comments = ensure_list(self._prev_comments)
@@ -2288,7 +2299,7 @@ class Parser(metaclass=_Parser):
                     if table
                     else self._parse_select(nested=True, parse_set_operation=False)
                 )
-                this = self._parse_set_operations(self._parse_query_modifiers(this))
+                this = self._parse_query_modifiers(self._parse_set_operations(this))
 
             self._match_r_paren()
 
@@ -3174,14 +3185,19 @@ class Parser(metaclass=_Parser):
     def _parse_order(
         self, this: t.Optional[exp.Expression] = None, skip_order_token: bool = False
     ) -> t.Optional[exp.Expression]:
+        siblings = None
         if not skip_order_token and not self._match(TokenType.ORDER_BY):
-            return this
+            if not self._match(TokenType.ORDER_SIBLINGS_BY):
+                return this
+
+            siblings = True
 
         return self.expression(
             exp.Order,
             this=this,
             expressions=self._parse_csv(self._parse_ordered),
             interpolate=self._parse_interpolate(),
+            siblings=siblings,
         )
 
     def _parse_sort(self, exp_class: t.Type[E], token: TokenType) -> t.Optional[E]:
@@ -3440,10 +3456,10 @@ class Parser(metaclass=_Parser):
             return this
         return self.expression(exp.Escape, this=this, expression=self._parse_string())
 
-    def _parse_interval(self) -> t.Optional[exp.Interval]:
+    def _parse_interval(self, match_interval: bool = True) -> t.Optional[exp.Interval]:
         index = self._index
 
-        if not self._match(TokenType.INTERVAL):
+        if not self._match(TokenType.INTERVAL) and match_interval:
             return None
 
         if self._match(TokenType.STRING, advance=False):
@@ -3460,7 +3476,10 @@ class Parser(metaclass=_Parser):
             self._retreat(index)
             return None
 
-        unit = self._parse_function() or self._parse_var(any_token=True, upper=True)
+        unit = self._parse_function() or (
+            not self._match(TokenType.ALIAS, advance=False)
+            and self._parse_var(any_token=True, upper=True)
+        )
 
         # Most dialects support, e.g., the form INTERVAL '5' day, thus we try to parse
         # each INTERVAL expression into this canonical form so it's easy to transpile
@@ -3536,6 +3555,12 @@ class Parser(metaclass=_Parser):
     def _parse_type(self, parse_interval: bool = True) -> t.Optional[exp.Expression]:
         interval = parse_interval and self._parse_interval()
         if interval:
+            # Convert INTERVAL 'val_1' unit_1 ... 'val_n' unit_n into a sum of intervals
+            while self._match_set((TokenType.STRING, TokenType.NUMBER), advance=False):
+                interval = self.expression(  # type: ignore
+                    exp.Add, this=interval, expression=self._parse_interval(match_interval=False)
+                )
+
             return interval
 
         index = self._index
@@ -3634,7 +3659,7 @@ class Parser(metaclass=_Parser):
 
         if nested and self._match(TokenType.LT):
             if is_struct:
-                expressions = self._parse_csv(self._parse_struct_types)
+                expressions = self._parse_csv(lambda: self._parse_struct_types(type_required=True))
             else:
                 expressions = self._parse_csv(
                     lambda: self._parse_types(
@@ -3709,10 +3734,19 @@ class Parser(metaclass=_Parser):
 
         return this
 
-    def _parse_struct_types(self) -> t.Optional[exp.Expression]:
+    def _parse_struct_types(self, type_required: bool = False) -> t.Optional[exp.Expression]:
+        index = self._index
         this = self._parse_type(parse_interval=False) or self._parse_id_var()
         self._match(TokenType.COLON)
-        return self._parse_column_def(this)
+        column_def = self._parse_column_def(this)
+
+        if type_required and (
+            (isinstance(this, exp.Column) and this.this is column_def) or this is column_def
+        ):
+            self._retreat(index)
+            return self._parse_types()
+
+        return column_def
 
     def _parse_at_time_zone(self, this: t.Optional[exp.Expression]) -> t.Optional[exp.Expression]:
         if not self._match_text_seq("AT", "TIME", "ZONE"):
@@ -4283,8 +4317,10 @@ class Parser(metaclass=_Parser):
     def _parse_primary_key_part(self) -> t.Optional[exp.Expression]:
         return self._parse_field()
 
-    def _parse_period_for_system_time(self) -> exp.PeriodForSystemTimeConstraint:
-        self._match(TokenType.TIMESTAMP_SNAPSHOT)
+    def _parse_period_for_system_time(self) -> t.Optional[exp.PeriodForSystemTimeConstraint]:
+        if not self._match(TokenType.TIMESTAMP_SNAPSHOT):
+            self._retreat(self._index - 1)
+            return None
 
         id_vars = self._parse_wrapped_id_vars()
         return self.expression(
@@ -4565,7 +4601,7 @@ class Parser(metaclass=_Parser):
     def _parse_json_key_value(self) -> t.Optional[exp.JSONKeyValue]:
         self._match_text_seq("KEY")
         key = self._parse_column()
-        self._match_set((TokenType.COLON, TokenType.COMMA))
+        self._match_set(self.JSON_KEY_VALUE_SEPARATOR_TOKENS)
         self._match_text_seq("VALUE")
         value = self._parse_bitwise()
 
@@ -4587,7 +4623,15 @@ class Parser(metaclass=_Parser):
 
         return None
 
-    def _parse_json_object(self) -> exp.JSONObject:
+    @t.overload
+    def _parse_json_object(self, agg: Literal[False]) -> exp.JSONObject:
+        ...
+
+    @t.overload
+    def _parse_json_object(self, agg: Literal[True]) -> exp.JSONObjectAgg:
+        ...
+
+    def _parse_json_object(self, agg=False):
         star = self._parse_star()
         expressions = (
             [star]
@@ -4610,7 +4654,7 @@ class Parser(metaclass=_Parser):
         encoding = self._match_text_seq("ENCODING") and self._parse_var()
 
         return self.expression(
-            exp.JSONObject,
+            exp.JSONObjectAgg if agg else exp.JSONObject,
             expressions=expressions,
             null_handling=null_handling,
             unique_keys=unique_keys,

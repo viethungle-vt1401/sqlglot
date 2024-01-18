@@ -16,7 +16,6 @@ from sqlglot.dialects.dialect import (
     format_time_lambda,
     if_sql,
     inline_array_sql,
-    json_keyvalue_comma_sql,
     max_or_greatest,
     min_or_least,
     no_ilike_sql,
@@ -29,6 +28,9 @@ from sqlglot.dialects.dialect import (
 )
 from sqlglot.helper import seq_get, split_num_words
 from sqlglot.tokens import TokenType
+
+if t.TYPE_CHECKING:
+    from typing_extensions import Literal
 
 logger = logging.getLogger("sqlglot")
 
@@ -206,12 +208,8 @@ def _unix_to_time_sql(self: BigQuery.Generator, expression: exp.UnixToTime) -> s
         return f"TIMESTAMP_MILLIS({timestamp})"
     if scale == exp.UnixToTime.MICROS:
         return f"TIMESTAMP_MICROS({timestamp})"
-    if scale == exp.UnixToTime.NANOS:
-        # We need to cast to INT64 because that's what BQ expects
-        return f"TIMESTAMP_MICROS(CAST({timestamp} / 1000 AS INT64))"
 
-    self.unsupported(f"Unsupported scale for timestamp: {scale}.")
-    return ""
+    return f"TIMESTAMP_SECONDS(CAST({timestamp} / POW(10, {scale}) AS INT64))"
 
 
 def _parse_time(args: t.List) -> exp.Func:
@@ -377,9 +375,7 @@ class BigQuery(Dialect):
             "TIMESTAMP_MILLIS": lambda args: exp.UnixToTime(
                 this=seq_get(args, 0), scale=exp.UnixToTime.MILLIS
             ),
-            "TIMESTAMP_SECONDS": lambda args: exp.UnixToTime(
-                this=seq_get(args, 0), scale=exp.UnixToTime.SECONDS
-            ),
+            "TIMESTAMP_SECONDS": lambda args: exp.UnixToTime(this=seq_get(args, 0)),
             "TO_JSON_STRING": exp.JSONFormat.from_arg_list,
         }
 
@@ -476,7 +472,15 @@ class BigQuery(Dialect):
 
             return table
 
-        def _parse_json_object(self) -> exp.JSONObject:
+        @t.overload
+        def _parse_json_object(self, agg: Literal[False]) -> exp.JSONObject:
+            ...
+
+        @t.overload
+        def _parse_json_object(self, agg: Literal[True]) -> exp.JSONObjectAgg:
+            ...
+
+        def _parse_json_object(self, agg=False):
             json_object = super()._parse_json_object()
             array_kv_pair = seq_get(json_object.expressions, 0)
 
@@ -531,6 +535,8 @@ class BigQuery(Dialect):
         LIMIT_ONLY_LITERALS = True
         SUPPORTS_TABLE_ALIAS_COLUMNS = False
         UNPIVOT_ALIASES_ARE_IDENTIFIERS = False
+        JSON_KEY_VALUE_PAIR_SEP = ","
+        NULL_ORDERING_SUPPORTED = False
 
         TRANSFORMS = {
             **generator.Generator.TRANSFORMS,
@@ -562,7 +568,6 @@ class BigQuery(Dialect):
             exp.ILike: no_ilike_sql,
             exp.IntDiv: rename_func("DIV"),
             exp.JSONFormat: rename_func("TO_JSON_STRING"),
-            exp.JSONKeyValue: json_keyvalue_comma_sql,
             exp.Max: max_or_greatest,
             exp.MD5: lambda self, e: self.func("TO_HEX", self.func("MD5", e.this)),
             exp.MD5Digest: rename_func("MD5"),

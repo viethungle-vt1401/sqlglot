@@ -7,6 +7,7 @@ class TestOracle(Validator):
     dialect = "oracle"
 
     def test_oracle(self):
+        self.validate_identity("REGEXP_REPLACE('source', 'search')")
         parse_one("ALTER TABLE tbl_name DROP FOREIGN KEY fk_symbol", dialect="oracle").assert_is(
             exp.AlterTable
         )
@@ -35,6 +36,9 @@ class TestOracle(Validator):
         self.validate_identity("SELECT COUNT(*) * 10 FROM orders SAMPLE (10) SEED (1)")
         self.validate_identity("SELECT * FROM V$SESSION")
         self.validate_identity(
+            "SELECT last_name, employee_id, manager_id, LEVEL FROM employees START WITH employee_id = 100 CONNECT BY PRIOR employee_id = manager_id ORDER SIBLINGS BY last_name"
+        )
+        self.validate_identity(
             "ALTER TABLE Payments ADD (Stock NUMBER NOT NULL, dropid VARCHAR2(500) NOT NULL)"
         )
         self.validate_identity(
@@ -51,6 +55,14 @@ class TestOracle(Validator):
         )
         self.validate_identity(
             "SELECT MIN(column_name) KEEP (DENSE_RANK FIRST ORDER BY column_name DESC) FROM table_name"
+        )
+        self.validate_identity(
+            """SELECT JSON_OBJECT(KEY 'key1' IS emp.column1, KEY 'key2' IS emp.column1) "emp_key" FROM emp""",
+            """SELECT JSON_OBJECT('key1': emp.column1, 'key2': emp.column1) AS "emp_key" FROM emp""",
+        )
+        self.validate_identity(
+            "SELECT JSON_OBJECTAGG(KEY department_name VALUE department_id) FROM dep WHERE id <= 30",
+            "SELECT JSON_OBJECTAGG(department_name: department_id) FROM dep WHERE id <= 30",
         )
         self.validate_identity(
             "SYSDATE",
@@ -135,6 +147,20 @@ class TestOracle(Validator):
             write={
                 "oracle": "CAST(x AS sch.udt)",
                 "postgres": "CAST(x AS sch.udt)",
+            },
+        )
+        self.validate_all(
+            "SELECT TO_TIMESTAMP('2024-12-12 12:12:12.000000', 'YYYY-MM-DD HH24:MI:SS.FF6')",
+            write={
+                "oracle": "SELECT TO_TIMESTAMP('2024-12-12 12:12:12.000000', 'YYYY-MM-DD HH24:MI:SS.FF6')",
+                "duckdb": "SELECT STRPTIME('2024-12-12 12:12:12.000000', '%Y-%m-%d %H:%M:%S.%f')",
+            },
+        )
+        self.validate_all(
+            "SELECT TO_DATE('2024-12-12', 'YYYY-MM-DD')",
+            write={
+                "oracle": "SELECT TO_DATE('2024-12-12', 'YYYY-MM-DD')",
+                "duckdb": "SELECT CAST(STRPTIME('2024-12-12', '%Y-%m-%d') AS DATE)",
             },
         )
 
